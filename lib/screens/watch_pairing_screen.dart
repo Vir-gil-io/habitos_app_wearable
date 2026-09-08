@@ -18,6 +18,7 @@ class _WatchPairingScreenState extends State<WatchPairingScreen> {
   final _repo = PairingRepository(Supabase.instance.client);
   String? _deviceSecret;
   String? _error;
+  bool _generating = false;
   Timer? _pollTimer;
 
   @override
@@ -27,12 +28,28 @@ class _WatchPairingScreenState extends State<WatchPairingScreen> {
   }
 
   Future<void> _startPairing() async {
+    setState(() {
+      _generating = true;
+      _error = null;
+      _deviceSecret = null;
+    });
+
+    _pollTimer?.cancel();
+
     try {
       final result = await _repo.requestPairing();
-      setState(() => _deviceSecret = result.deviceSecret);
+      if (!mounted) return;
+      setState(() {
+        _deviceSecret = result.deviceSecret;
+        _generating = false;
+      });
       _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) => _poll());
     } catch (e) {
-      setState(() => _error = 'Error: $e'); // ← temporal para diagnóstico
+      if (!mounted) return;
+      setState(() {
+        _error = 'No se pudo generar el código. Reintenta.';
+        _generating = false;
+      });
     }
   }
 
@@ -70,7 +87,7 @@ class _WatchPairingScreenState extends State<WatchPairingScreen> {
     return Scaffold(
       body: SafeArea(
         child: Center(
-          child: Padding(
+          child: SingleChildScrollView(
             padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -81,14 +98,16 @@ class _WatchPairingScreenState extends State<WatchPairingScreen> {
                     style: TextStyle(color: AppTheme.primary,
                         fontWeight: FontWeight.bold, fontSize: 13)),
                 const SizedBox(height: 10),
-                if (_error != null)
+
+                if (_generating)
+                  const CircularProgressIndicator(color: AppTheme.primary, strokeWidth: 2)
+                else if (_error != null) ...[
                   Text(_error!,
                       style: const TextStyle(color: AppTheme.pending, fontSize: 10),
-                      textAlign: TextAlign.center)
-                else if (_deviceSecret == null)
-                  const CircularProgressIndicator(
-                      color: AppTheme.primary, strokeWidth: 2)
-                else ...[
+                      textAlign: TextAlign.center),
+                  const SizedBox(height: 12),
+                  _RetryButton(onTap: _startPairing),
+                ] else if (_deviceSecret != null) ...[
                   Container(
                     padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
@@ -107,10 +126,68 @@ class _WatchPairingScreenState extends State<WatchPairingScreen> {
                     textAlign: TextAlign.center,
                     style: TextStyle(fontSize: 10, color: AppTheme.textSecondary),
                   ),
+                  const SizedBox(height: 14),
+                  // Botón para regenerar el código, útil si expiró
+                  // o si se necesita mostrar uno nuevo en vivo.
+                  _RegenerateButton(onTap: _startPairing),
                 ],
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RegenerateButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _RegenerateButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: AppTheme.primary.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: AppTheme.primary.withValues(alpha: 0.4)),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.refresh_rounded, size: 13, color: AppTheme.primary),
+            SizedBox(width: 4),
+            Text(
+              'Nuevo código',
+              style: TextStyle(fontSize: 10, color: AppTheme.primary, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RetryButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _RetryButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: AppTheme.primary,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: const Text(
+          'Reintentar',
+          style: TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.w600),
         ),
       ),
     );
