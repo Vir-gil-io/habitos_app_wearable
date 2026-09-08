@@ -1,5 +1,4 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:habitos_app_wearable/config/app_theme.dart';
@@ -11,6 +10,7 @@ import 'package:habitos_app_wearable/screens/pages/summary_page.dart';
 import 'package:habitos_app_wearable/screens/pages/habits_page.dart';
 import 'package:habitos_app_wearable/screens/pages/next_activity_page.dart';
 import 'package:habitos_app_wearable/screens/pages/activity_page.dart';
+import 'package:habitos_app_wearable/widgets/reminder_notification_overlay.dart';
 
 class WatchHomeScreen extends StatefulWidget {
   final String deviceSecret;
@@ -37,7 +37,11 @@ class _WatchHomeScreenState extends State<WatchHomeScreen> {
 
   Timer? _refreshTimer;
 
-  // ── Simulador de actividad ───────────────────────────────────────────────
+  // ── Notificaciones de recordatorios ──────────────────────────────────────
+  final Set<String> _notifiedReminderIds = {};
+  WatchReminder? _activeNotification;
+  Timer? _notificationDismissTimer;
+
   late final WearableMetricsSimulator _simulator;
   SimulatedMetrics _liveMetrics = const SimulatedMetrics(
     steps: 0, calories: 0, distanceKm: 0, activeMinutes: 0,
@@ -58,8 +62,7 @@ class _WatchHomeScreenState extends State<WatchHomeScreen> {
     );
     _load();
 
-    // Refresco silencioso periódico (sin spinner) para reflejar cambios
-    // hechos desde el teléfono, sin necesidad de reiniciar la app del reloj.
+    // Refresco silencioso + revisión de recordatorios cada 5 segundos
     _refreshTimer = Timer.periodic(
       const Duration(seconds: 5),
       (_) => _silentRefresh(),
@@ -77,11 +80,10 @@ class _WatchHomeScreenState extends State<WatchHomeScreen> {
         _reminders = reminders;
         _loading = false;
       });
+      _checkReminders();
     }
   }
 
-  /// Igual que _load, pero sin activar el spinner de carga inicial —
-  /// evita parpadeos visuales en cada actualización automática.
   Future<void> _silentRefresh() async {
     final habits = await _repo.getTodayHabits();
     final streak = await _repo.getGlobalStreak();
@@ -92,7 +94,43 @@ class _WatchHomeScreenState extends State<WatchHomeScreen> {
         _streak = streak;
         _reminders = reminders;
       });
+      _checkReminders();
     }
+  }
+
+  /// Compara la hora de cada recordatorio con la hora actual. Si un
+  /// recordatorio "cumplió" su hora hace muy poco (ventana de 30 segundos,
+  /// suficiente para no perderlo dado el refresco cada 5s) y todavía no
+  /// se notificó, dispara la alerta en pantalla.
+  void _checkReminders() {
+    final now = DateTime.now();
+
+    for (final r in _reminders) {
+      if (r.timeOfDay == null) continue;
+      if (_notifiedReminderIds.contains(r.id)) continue;
+
+      final parts = r.timeOfDay!.split(':');
+      final scheduled = DateTime(
+        r.date.year, r.date.month, r.date.day,
+        int.parse(parts[0]), int.parse(parts[1]),
+      );
+
+      final diff = now.difference(scheduled).inSeconds;
+      if (diff >= 0 && diff <= 5) {
+        _notifiedReminderIds.add(r.id);
+        _showReminderNotification(r);
+        break; // muestra una a la vez, aunque coincidan varias
+      }
+    }
+  }
+
+  void _showReminderNotification(WatchReminder reminder) {
+    _notificationDismissTimer?.cancel();
+    setState(() => _activeNotification = reminder);
+
+    _notificationDismissTimer = Timer(const Duration(seconds: 6), () {
+      if (mounted) setState(() => _activeNotification = null);
+    });
   }
 
   void _toggleSimulation() {
@@ -108,6 +146,7 @@ class _WatchHomeScreenState extends State<WatchHomeScreen> {
   void dispose() {
     _simulator.dispose();
     _refreshTimer?.cancel();
+    _notificationDismissTimer?.cancel();
     _pageController.dispose();
     super.dispose();
   }
@@ -134,42 +173,46 @@ class _WatchHomeScreenState extends State<WatchHomeScreen> {
     ];
 
     return Scaffold(
-      body: RefreshIndicator(
-        onRefresh: _load,
-        color: AppTheme.primary,
-        child: Stack(
-          children: [
-            // itemCount null → PageView.builder infinito en ambas direcciones.
-            // Al llegar al límite "derecho" (o izquierdo) el índice sigue
-            // creciendo/decreciendo y el modulo repite el ciclo de páginas.
-            PageView.builder(
-              controller: _pageController,
-              onPageChanged: (i) => setState(() => _currentPage = i % _pageCount),
-              itemBuilder: (context, i) => pages[i % _pageCount],
+      body: Stack(
+        children: [
+          PageView.builder(
+            controller: _pageController,
+            onPageChanged: (i) => setState(() => _currentPage = i % _pageCount),
+            itemBuilder: (context, i) => pages[i % _pageCount],
+          ),
+          Positioned(
+            bottom: 10,
+            left: 0,
+            right: 0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(pages.length, (i) {
+                final active = i == _currentPage;
+                return AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  width: active ? 8 : 5,
+                  height: active ? 8 : 5,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: active ? AppTheme.primary : AppTheme.divider,
+                  ),
+                );
+              }),
             ),
-            Positioned(
-              bottom: 10,
-              left: 0,
-              right: 0,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(pages.length, (i) {
-                  final active = i == _currentPage;
-                  return AnimatedContainer(
-                    duration: const Duration(milliseconds: 150),
-                    margin: const EdgeInsets.symmetric(horizontal: 3),
-                    width: active ? 8 : 5,
-                    height: active ? 8 : 5,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: active ? AppTheme.primary : AppTheme.divider,
-                    ),
-                  );
-                }),
-              ),
+          ),
+
+          // ── Overlay de notificación ─────────────────────────────────────
+          // No navega a ninguna pantalla nueva: al desaparecer, el usuario
+          // sigue exactamente donde estaba (la página del PageView nunca
+          // cambia por debajo de la alerta).
+          if (_activeNotification != null)
+            AnimatedOpacity(
+              duration: const Duration(milliseconds: 250),
+              opacity: _activeNotification != null ? 1 : 0,
+              child: ReminderNotificationOverlay(reminder: _activeNotification!),
             ),
-          ],
-        ),
+        ],
       ),
     );
   }
